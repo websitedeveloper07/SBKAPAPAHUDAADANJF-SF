@@ -25,16 +25,11 @@ user_client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
 bot_client = Bot(token=BOT_TOKEN)
 
 # ---------------- STATE ----------------
-# Whether admin allowed dropping
 dropping_enabled = False
 
 # ---------------- FUNCTIONS ----------------
 async def process_card(card: str):
-    """
-    Sends the card to API and posts the response in official group
-    """
     params = {"site": SITE, "cc": card, "proxy": PROXY}
-
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(API_URL, params=params) as resp:
@@ -45,9 +40,7 @@ async def process_card(card: str):
     cc = escape_markdown(str(data.get('cc')), version=2)
     price = escape_markdown(str(data.get('Price')), version=2)
     response = escape_markdown(str(data.get('Response')), version=2)
-
     msg = f"CC: `{cc}`\nPrice: {price}\nResponse: {response}"
-    print(f"[+] Sending to official group:\n{msg}\n")
 
     try:
         await bot_client.send_message(chat_id=TARGET_GROUP_ID, text=msg, parse_mode="MarkdownV2")
@@ -62,30 +55,17 @@ async def card_listener(event):
     if not text:
         return
 
-    print(f"[>] Message received in private group: {text}")
-
     matches = CARD_REGEX.findall(text)
-    if not matches:
-        print("⚠️ No valid card found in the message")
+    if not matches or not dropping_enabled:
         return
 
-    if not dropping_enabled:
-        print("⏸ Dropping not enabled. Skipping cards.")
-        return
-
-    # Process all cards in parallel
-    tasks = []
-    for match in matches:
-        card_str = "|".join(match)
-        print(f"[~] Found card: {card_str}")
-        tasks.append(asyncio.create_task(process_card(card_str)))
+    tasks = [asyncio.create_task(process_card("|".join(m))) for m in matches]
     await asyncio.gather(*tasks)
 
 # ---------------- BOT COMMANDS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.phone_number)
     chat_id = update.effective_chat.id
-
     if user_id == ADMIN_PHONE:
         await context.bot.send_message(chat_id=chat_id, text="✅ Send me /drop to start dropping checked CC")
     else:
@@ -94,43 +74,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def drop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global dropping_enabled
-    user_id = str(update.effective_user.phone_number)
-    chat_id = update.effective_chat.id
-
-    if user_id == ADMIN_PHONE:
+    if str(update.effective_user.phone_number) == ADMIN_PHONE:
         dropping_enabled = True
-        await context.bot.send_message(chat_id=chat_id, text="✅ Dropping enabled! Now forwarding new cards from private group.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Dropping enabled!")
     else:
-        await context.bot.send_message(chat_id=chat_id, text="❌ Access Denied!")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Access Denied!")
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global dropping_enabled
-    user_id = str(update.effective_user.phone_number)
-    chat_id = update.effective_chat.id
-
-    if user_id == ADMIN_PHONE:
+    if str(update.effective_user.phone_number) == ADMIN_PHONE:
         dropping_enabled = False
-        await context.bot.send_message(chat_id=chat_id, text="⏹ Dropping stopped.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="⏹ Dropping stopped.")
     else:
-        await context.bot.send_message(chat_id=chat_id, text="❌ Access Denied!")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Access Denied!")
 
 # ---------------- MAIN ----------------
-if __name__ == "__main__":
-    print("✅ Hybrid bot is running...")
+async def main():
+    await user_client.start()
 
-    # Start user session
-    user_client.start()
-
-    # Start bot commands in background
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("drop", drop))
     app.add_handler(CommandHandler("stop", stop))
 
-    async def run_bot():
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling()
-        await user_client.run_until_disconnected()
+    # Run the telegram bot in background
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
 
-    asyncio.run(run_bot())
+    # Keep Telethon client running on same loop
+    await user_client.run_until_disconnected()
+
+if __name__ == "__main__":
+    asyncio.get_event_loop().run_until_complete(main())
