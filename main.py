@@ -16,7 +16,7 @@ BOT_TOKEN = "7991358662:AAGQIQFKzKc4bHwJM_Sgt5MZ4nJZ4PhTpes"
 
 # Groups
 PRIVATE_GROUP_ID = -1002682944548  # Private group to monitor
-TARGET_GROUP_ID = -1002554243871   # Your official group ID
+TARGET_GROUP_ID = -1002968335063   # Your official group ID
 
 # API config
 API_URL = "https://autosh.arpitchk.shop/puto.php"
