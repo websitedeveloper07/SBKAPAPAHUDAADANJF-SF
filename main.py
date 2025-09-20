@@ -15,7 +15,7 @@ logger = logging.getLogger("fast-card-bot")
 # Replace these with your real details
 api_id = 17455551
 api_hash = "abde39d2fad230528b2695a14102e76a"
-SESSION_STRING = "1BVtsO...YOUR_SESSION...yf4="
+SESSION_STRING = "1BVtsOLwBu6ENhB2xUwqQMeRb6FQoytffPpwMLt-CwrOa3uq6NQlpb3nN4nIByzoDeWalXRhiZaiRbdCqCOHWG3mfsFZcw_YijQUdLK7rdS-5AXRsY5oQdKACOoiHgtslVac2_wNCL6MA_UUhU5orRzaV7kkBtimv6XY6y-9yab4SlrUsxafzOjhqfhDRfX-stkrHgp9_wwOMYheTnUbzMkRsQnjAFLsd-AuuVkXdTPI1HoPzDzRVma_7ysD8K4fNaO2VWYoQQ0yM3-jcRGpGELYARrTz6AvVLSaosypQPGX_B-ukh1CJc_2hVKxz3FgxCiP6md1rMlzQujNB6ejl20L0_2P-yf4="
 
 PRIVATE_GROUP_ID = -1002682944548   # group to listen to
 TARGET_GROUP_ID = -1002968335063    # group to send results to
