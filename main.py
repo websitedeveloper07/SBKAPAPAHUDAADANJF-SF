@@ -46,7 +46,7 @@ async def process_card(card: str):
 
     for attempt in range(3):  # retry 3 times
         try:
-            async with session.get(API_URL, params=params, timeout=20) as resp:
+            async with session.get(API_URL, params=params, timeout=55) as resp:
                 data = await resp.json()
                 break
         except Exception as e:
